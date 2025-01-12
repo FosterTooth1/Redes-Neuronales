@@ -10,13 +10,12 @@ import time
 from keras.regularizers import l2
 from keras.applications import VGG16
 from keras.applications import ResNet50
-from keras.applications.vgg16 import preprocess_input
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 # Cargar CIFAR-10
 (x_train, y_train), (x_test, y_test) = cifar10.load_data()
 
-# Normalizar los valores de los píxeles en el rango [0, 1]
+# Normalizamos los valores de los píxeles en el rango [0, 1]
 x_train = x_train.astype('float32') / 255.0
 x_test = x_test.astype('float32') / 255.0
 
@@ -33,7 +32,6 @@ def build_mlp(input_shape):
     model.add(Dense(10, activation='softmax'))
     return model
 
-# Función para construir CNN básica
 def build_cnn(input_shape):
     model = Sequential()
     model.add(Conv2D(32, (3, 3), activation='relu', input_shape=input_shape))
@@ -183,3 +181,134 @@ results = {
 print("Resultados:")
 for model_name, metrics in results.items():
     print(f"{model_name}: Tiempo de entrenamiento: {metrics['time']:.2f} segundos")
+    
+# Implementacion de ventana deslizante
+    
+import cv2  # Necesario para redimensionar ventanas
+# Mapeo de etiquetas para referencia
+label_names = ['Avión', 'Automóvil', 'Pájaro', 'Gato', 'Ciervo',
+               'Perro', 'Rana', 'Caballo', 'Barco', 'Camión']
+
+
+# Clase objetivo: 'Gato'
+target_class = 3
+target_class_name = label_names[target_class]
+print(f"Clase objetivo seleccionada: {target_class_name} (Clase {target_class})")
+
+def sliding_window_detector(model, image, window_size=(16, 16), step_size=8, threshold=0.5):
+    """
+    Detecta la presencia de la clase objetivo en una imagen utilizando el algoritmo de ventana deslizante.
+
+    Args:
+        model: Modelo de clasificación entrenado.
+        image: Imagen de entrada (32x32x3).
+        window_size: Tamaño de la ventana deslizante.
+        step_size: Paso de deslizamiento de la ventana.
+        threshold: Umbral de confianza para la detección.
+
+    Returns:
+        detected: Booleano que indica si la clase fue detectada.
+        detection_windows: Lista de ventanas detectadas con confianza >= threshold.
+    """
+    detected = False
+    detection_windows = []
+    img_height, img_width, _ = image.shape
+    win_height, win_width = window_size
+
+    for y in range(0, img_height - win_height + 1, step_size):
+        for x in range(0, img_width - win_width + 1, step_size):
+            window = image[y:y+win_height, x:x+win_width]
+            # Redimensionar la ventana al tamaño de entrada del modelo (32x32)
+            window_resized = cv2.resize(window, (32, 32))
+            window_expanded = np.expand_dims(window_resized, axis=0)
+            # Predecir la clase
+            preds = model.predict(window_expanded)
+            pred_class = np.argmax(preds, axis=1)[0]
+            pred_prob = preds[0][target_class]
+            if pred_class == target_class and pred_prob >= threshold:
+                detected = True
+                detection_windows.append((x, y, pred_prob))
+    return detected, detection_windows
+
+def evaluate_sliding_window_detector(model, x_test, y_test, window_size=(16, 16), step_size=8, threshold=0.5):
+    """
+    Evalúa el detector de ventana deslizante en el conjunto de prueba.
+
+    Args:
+        model: Modelo de clasificación entrenado.
+        x_test: Conjunto de imágenes de prueba.
+        y_test: Etiquetas verdaderas de prueba.
+        window_size: Tamaño de la ventana deslizante.
+        step_size: Paso de deslizamiento de la ventana.
+        threshold: Umbral de confianza para la detección.
+
+    Returns:
+        metrics: Diccionario con precisión, recall y F1-score.
+    """
+    y_true = (y_test.flatten() == target_class).astype(int)
+    y_pred = []
+
+    for idx, image in enumerate(x_test):
+        detected, _ = sliding_window_detector(model, image, window_size, step_size, threshold)
+        y_pred.append(int(detected))
+        if (idx+1) % 1000 == 0:
+            print(f"Procesadas {idx+1} imágenes")
+
+    y_pred = np.array(y_pred)
+
+    precision = precision_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
+
+    report = classification_report(y_true, y_pred, target_names=['No Gato', 'Gato'])
+    print("Reporte de Clasificación del Detector de Ventana Deslizante:")
+    print(report)
+
+    metrics = {
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1
+    }
+
+    return metrics
+
+# Evaluar el detector
+print("Evaluando el detector de ventana deslizante...")
+metrics_detector = evaluate_sliding_window_detector(model_cnn, x_test, y_test, window_size=(16, 16), step_size=8, threshold=0.5)
+
+print("Métricas del Detector:")
+for metric, value in metrics_detector.items():
+    print(f"{metric.capitalize()}: {value:.4f}")
+    
+def visualize_detections(model, image, detection_windows, threshold=0.5):
+    '''
+    Visualiza las ventanas detectadas en una imagen.
+
+    Args:
+        model: Modelo de clasificación entrenado.
+        image: Imagen de entrada (32x32x3).
+        detection_windows: Lista de ventanas detectadas.
+        threshold: Umbral de confianza para la visualización.
+    '''
+    image_copy = (image * 255).astype(np.uint8).copy()
+    for (x, y, prob) in detection_windows:
+        cv2.rectangle(image_copy, (x, y), (x + 16, y + 16), (0, 255, 0), 1)
+        cv2.putText(image_copy, f"{prob:.2f}", (x, y-2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0,255,0), 1)
+    
+    plt.figure(figsize=(2,2))
+    plt.imshow(image_copy)
+    plt.title(f"Detecciones de '{target_class_name}'")
+    plt.axis('off')
+    plt.show()
+
+# Mostrar algunas detecciones
+num_examples = 5
+indices = np.where((y_test.flatten() == target_class) | (y_test.flatten() != target_class))[0][:num_examples]
+
+for idx in indices:
+    image = x_test[idx]
+    true_label = y_test[idx][0]
+    detected, detection_windows = sliding_window_detector(model_cnn, image, window_size=(16,16), step_size=8, threshold=0.5)
+    plt.figure()
+    visualize_detections(model_cnn, image, detection_windows, threshold=0.5)
+    plt.title(f"Imagen {idx} - Verdadero: {'Gato' if true_label == target_class else label_names[true_label]} - Detectado: {'Sí' if detected else 'No'}")
